@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>QRスキャナー — ハルディン作業報告</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;background:#000;overflow:hidden}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+.wrap{position:relative;height:100%;display:flex;flex-direction:column}
+video{flex:1;width:100%;object-fit:cover}
+canvas{display:none}
+.overlay{position:absolute;inset:0;pointer-events:none}
+.guide{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+  width:220px;height:220px;pointer-events:none}
+.guide i{position:absolute;width:28px;height:28px;
+  border-color:rgba(255,255,255,.85);border-style:solid}
+.guide i:nth-child(1){top:0;left:0;border-width:3px 0 0 3px;border-radius:6px 0 0 0}
+.guide i:nth-child(2){top:0;right:0;border-width:3px 3px 0 0;border-radius:0 6px 0 0}
+.guide i:nth-child(3){bottom:0;left:0;border-width:0 0 3px 3px;border-radius:0 0 0 6px}
+.guide i:nth-child(4){bottom:0;right:0;border-width:0 3px 3px 0;border-radius:0 0 6px 0}
+.guide.ok i{border-color:#4CAF50;border-width:4px}
+.mask{position:absolute;inset:0;
+  background:radial-gradient(circle at center,
+    transparent 110px, rgba(0,0,0,.55) 112px)}
+.bar{position:absolute;bottom:0;left:0;right:0;
+  padding:14px 16px calc(14px + env(safe-area-inset-bottom));
+  background:rgba(0,0,0,.72);color:#fff;text-align:center;font-size:14px;
+  line-height:1.5}
+.bar.ok{background:rgba(46,125,50,.92)}
+.close{position:absolute;top:calc(10px + env(safe-area-inset-top));right:10px;
+  width:44px;height:44px;border-radius:22px;border:none;
+  background:rgba(0,0,0,.5);color:#fff;font-size:20px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;z-index:2}
+.err{position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;color:#fff;padding:24px;
+  text-align:center;gap:16px;background:#111}
+.err h2{font-size:17px;color:#ff6b6b}
+.err p{font-size:13px;line-height:1.7;color:#bbb}
+.err button{padding:10px 24px;border:none;border-radius:8px;
+  background:#fff;color:#111;font-size:14px;cursor:pointer}
+.confirm{position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;color:#fff;padding:24px;
+  text-align:center;gap:12px;background:rgba(0,0,0,.88);z-index:3}
+.confirm .label{font-size:22px;font-weight:bold;line-height:1.4;
+  max-width:90%;word-break:break-all}
+.confirm .sub{font-size:13px;color:#aaa}
+.confirm .btns{display:flex;gap:12px;margin-top:8px;width:100%;max-width:320px}
+.confirm .btns button{flex:1;padding:14px 0;border:none;border-radius:10px;
+  font-size:16px;font-weight:bold;cursor:pointer}
+.confirm .btn-ok{background:#2e7d4f;color:#fff}
+.confirm .btn-retry{background:#555;color:#fff}
+</style>
+</head>
+<body>
+<div class="wrap" id="W">
+  <video id="v" autoplay playsinline muted></video>
+  <canvas id="c"></canvas>
+  <div class="overlay">
+    <div class="mask"></div>
+    <div class="guide" id="G"><i></i><i></i><i></i><i></i></div>
+  </div>
+  <div class="bar" id="B">カメラを起動中…</div>
+  <button class="close" id="X">&#x2715;</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+<script>
+(function(){
+  var v=document.getElementById('v'), c=document.getElementById('c'),
+      ctx=c.getContext('2d',{willReadFrequently:true}),
+      bar=document.getElementById('B'), guide=document.getElementById('G'),
+      wrap=document.getElementById('W'),
+      active=false, stream=null;
+
+  var ps = new URLSearchParams(location.search);
+  var gasUrl = ps.get('gas') || '';
+
+  document.getElementById('X').onclick = function(){
+    stopCam(); window.close();
+  };
+
+  function startCam(){
+    v.srcObject=null;
+    c.width=0; c.height=0;
+    navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720}}
+    }).then(function(s){
+      stream=s; v.srcObject=s;
+      v.onloadeddata=function(){
+        v.onloadeddata=null;
+        active=true;
+        bar.textContent='枠内にQRコードを合わせてください';
+        bar.className='bar';
+        guide.className='guide';
+        setTimeout(raf,500);
+      };
+      v.play();
+    }).catch(function(e){ showErr(e.message); });
+  }
+
+  startCam();
+
+  function raf(){
+    if(!active) return;
+    if(v.readyState >= v.HAVE_ENOUGH_DATA){
+      var vw=v.videoWidth, vh=v.videoHeight;
+      var crop=Math.floor(Math.min(vw,vh)*0.35);
+      var cx=Math.floor((vw-crop)/2);
+      var cy=Math.floor((vh-crop)/2);
+      c.width=crop; c.height=crop;
+      ctx.drawImage(v, cx,cy,crop,crop, 0,0,crop,crop);
+      var d=ctx.getImageData(0,0,crop,crop);
+      var qr=jsQR(d.data,crop,crop,{inversionAttempts:'attemptBoth'});
+      if(qr && qr.data){ found(qr.data); return; }
+    }
+    requestAnimationFrame(raf);
+  }
+
+  function found(raw){
+    active=false;
+    if(navigator.vibrate) navigator.vibrate(80);
+
+    var payload=raw;
+    if(raw.indexOf('http')===0){
+      try{ var u=new URL(raw); payload=u.searchParams.get('qr')||raw; }catch(e){}
+    }
+    var parts=payload.split('|');
+    if(parts.length<2 || parts[0]!=='H'){
+      bar.textContent='ハルディンのQRではありません';
+      bar.className='bar';
+      setTimeout(function(){ active=true; raf(); },1500);
+      return;
+    }
+    var label=parts[1];
+    var idCode=parts.length>=3 ? parts[2] : '';
+    var rtype=parts.length>=4 ? parts[3] : '';
+
+    guide.className='guide ok';
+    stopCam();
+    showConfirm(payload, label, idCode, rtype);
+  }
+
+  function showConfirm(payload, label, idCode, rtype){
+    var box=document.createElement('div');
+    box.className='confirm';
+
+    var sub1=document.createElement('div');
+    sub1.className='sub';
+    sub1.textContent=rtype||'QR読取';
+    box.appendChild(sub1);
+
+    var lbl=document.createElement('div');
+    lbl.className='label';
+    lbl.textContent=label;
+    box.appendChild(lbl);
+
+    if(idCode){
+      var sub2=document.createElement('div');
+      sub2.className='sub';
+      sub2.textContent=idCode;
+      box.appendChild(sub2);
+    }
+
+    var btns=document.createElement('div');
+    btns.className='btns';
+
+    var btnRetry=document.createElement('button');
+    btnRetry.className='btn-retry';
+    btnRetry.textContent='やり直す';
+    btnRetry.onclick=function(){
+      wrap.removeChild(box);
+      startCam();
+    };
+    btns.appendChild(btnRetry);
+
+    var btnOk=document.createElement('button');
+    btnOk.className='btn-ok';
+    btnOk.textContent='読み込む';
+    btnOk.onclick=function(){ sendResult(payload,label); };
+    btns.appendChild(btnOk);
+
+    box.appendChild(btns);
+    wrap.appendChild(box);
+  }
+
+  function sendResult(payload,label){
+    if(window.opener){
+      try{
+        window.opener.postMessage({type:'hardin-qr',payload:payload},'*');
+      }catch(e){}
+      setTimeout(function(){ window.close(); },400);
+    } else if(gasUrl){
+      location.href=gasUrl+'?qr='+encodeURIComponent(payload);
+    } else {
+      bar.textContent='✓ '+label+'  (GASに戻って確認してください)';
+    }
+  }
+
+  function stopCam(){
+    active=false;
+    try{ if(stream) stream.getTracks().forEach(function(t){t.stop()}); }catch(e){}
+    v.srcObject=null;
+    stream=null;
+  }
+
+  function showErr(msg){
+    var w=document.getElementById('W');
+    while(w.firstChild) w.removeChild(w.firstChild);
+    var box=document.createElement('div');
+    box.className='err';
+    var h=document.createElement('h2');
+    h.textContent='カメラを起動できません';
+    var p=document.createElement('p');
+    p.textContent=msg;
+    var btn=document.createElement('button');
+    btn.textContent='閉じる';
+    btn.onclick=function(){ window.close(); };
+    box.appendChild(h); box.appendChild(p); box.appendChild(btn);
+    w.appendChild(box);
+  }
+})();
+</script>
+</body>
+</html>
