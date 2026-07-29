@@ -72,7 +72,7 @@ canvas{display:none}
       ctx=c.getContext('2d',{willReadFrequently:true}),
       bar=document.getElementById('B'), guide=document.getElementById('G'),
       wrap=document.getElementById('W'),
-      active=false, stream=null;
+      active=false, stream=null, state='scan';
 
   var ps = new URLSearchParams(location.search);
   var gasUrl = ps.get('gas') || '';
@@ -82,6 +82,7 @@ canvas{display:none}
   };
 
   function startCam(){
+    if(stream) return;          // 二重起動でカメラ要求が重ならないように
     v.srcObject=null;
     c.width=0; c.height=0;
     navigator.mediaDevices.getUserMedia({
@@ -101,6 +102,16 @@ canvas{display:none}
   }
 
   startCam();
+
+  // 裏に回ったタブがカメラを掴んだままにならないようにする。
+  // 掴んだままだと、表のタブを閉じた瞬間に裏のタブが保留していた
+  // カメラ許可ダイアログを出してくる（許可画面に戻って見える原因）
+  document.addEventListener('visibilitychange',function(){
+    if(state!=='scan') return;
+    if(document.hidden){ stopCam(); }
+    else if(!stream){ startCam(); }
+  });
+  window.addEventListener('pagehide',function(){ stopCam(); });
 
   function raf(){
     if(!active) return;
@@ -138,6 +149,7 @@ canvas{display:none}
     var rtype=parts.length>=4 ? parts[3] : '';
 
     guide.className='guide ok';
+    state='confirm';
     stopCam();
     showConfirm(payload, label, idCode, rtype);
   }
@@ -170,7 +182,9 @@ canvas{display:none}
     btnRetry.className='btn-retry';
     btnRetry.textContent='やり直す';
     btnRetry.onclick=function(){
+      if(sending) return;
       wrap.removeChild(box);
+      state='scan';
       startCam();
     };
     btns.appendChild(btnRetry);
@@ -178,20 +192,60 @@ canvas{display:none}
     var btnOk=document.createElement('button');
     btnOk.className='btn-ok';
     btnOk.textContent='読み込む';
-    btnOk.onclick=function(){ sendResult(payload,label); };
+    btnOk.onclick=function(){
+      if(sending) return;
+      btnOk.disabled=true; btnRetry.disabled=true;
+      btnOk.textContent='送信中…';
+      sendResult(payload,label);
+    };
     btns.appendChild(btnOk);
 
     box.appendChild(btns);
     wrap.appendChild(box);
   }
 
+  // 送信は「1回投げて即閉じる」ではなく、アプリからackが返るまで再送する。
+  // postMessageが1発で通らなかったり window.close() が効かない環境で、
+  // 結果が消えてスキャンやり直しになるのを防ぐ
+  var sending=false, ackGot=false, sendTimer=null;
+
+  window.addEventListener('message',function(e){
+    if(e.data && e.data.type==='hardin-qr-ack'){ ackGot=true; }
+  });
+
   function sendResult(payload,label){
-    if(window.opener){
-      try{
-        window.opener.postMessage({type:'hardin-qr',payload:payload},'*');
-      }catch(e){}
-      setTimeout(function(){ window.close(); },400);
-    } else if(gasUrl){
+    sending=true; ackGot=false;
+    var op=null;
+    try{ op=window.opener; }catch(e){}
+    if(!op){ fallback(payload,label); return; }
+
+    var msg={type:'hardin-qr',payload:payload};
+    var tries=0;
+    function post(){
+      if(ackGot){ finish(); return; }
+      if(tries++ > 15){ fallback(payload,label); return; }  // 約3秒
+      try{ op.postMessage(msg,'*'); }catch(e){}
+      // アプリがGASのiframe内にある構成のため、親側にも投げておく
+      try{ if(op.parent && op.parent!==op) op.parent.postMessage(msg,'*'); }catch(e){}
+      sendTimer=setTimeout(post,200);
+    }
+    post();
+  }
+
+  function finish(){
+    if(sendTimer) clearTimeout(sendTimer);
+    state='done';
+    stopCam();
+    setTimeout(function(){ window.close(); },200);
+  }
+
+  // openerに届かない場合（ホーム画面起動など別アプリで開かれたとき）は
+  // URLパラメータでアプリ本体へ渡す
+  function fallback(payload,label){
+    if(sendTimer) clearTimeout(sendTimer);
+    state='done';
+    stopCam();
+    if(gasUrl){
       location.href=gasUrl+'?qr='+encodeURIComponent(payload);
     } else {
       bar.textContent='✓ '+label+'  (GASに戻って確認してください)';
@@ -206,6 +260,7 @@ canvas{display:none}
   }
 
   function showErr(msg){
+    state='err';
     var w=document.getElementById('W');
     while(w.firstChild) w.removeChild(w.firstChild);
     var box=document.createElement('div');
